@@ -252,10 +252,10 @@ public class Function
         // If id is provided by validator, use it; otherwise generate.
         var id = body.Id ?? Random.Shared.Next(10000, 99999);
 
-        // Store id as NUMBER (N) to match common labs; many also accept S, but N is safer for "id": 16126.
+        // Store id as STRING because ${tables_table} hash key type is S in deployment resources.
         var item = new Dictionary<string, AttributeValue>
         {
-            ["id"] = new AttributeValue { N = id.ToString() }
+            ["id"] = new AttributeValue { S = id.ToString() }
         };
 
         if (body.Number is not null) item["number"] = new AttributeValue { N = body.Number.Value.ToString() };
@@ -291,24 +291,11 @@ public class Function
     {
         var tableName = GetTablesTableOrThrow();
 
-        // Try N key first (since we store id as N), fallback to S
-        GetItemResponse resp;
-        if (int.TryParse(tableId, out var idNum))
+        var resp = await _ddb.GetItemAsync(new GetItemRequest
         {
-            resp = await _ddb.GetItemAsync(new GetItemRequest
-            {
-                TableName = tableName,
-                Key = new Dictionary<string, AttributeValue> { ["id"] = new AttributeValue { N = idNum.ToString() } }
-            });
-        }
-        else
-        {
-            resp = await _ddb.GetItemAsync(new GetItemRequest
-            {
-                TableName = tableName,
-                Key = new Dictionary<string, AttributeValue> { ["id"] = new AttributeValue { S = tableId } }
-            });
-        }
+            TableName = tableName,
+            Key = new Dictionary<string, AttributeValue> { ["id"] = new AttributeValue { S = tableId } }
+        });
 
         if (resp.Item is null || resp.Item.Count == 0)
             return Json(404, new { message = "Table not found" });
