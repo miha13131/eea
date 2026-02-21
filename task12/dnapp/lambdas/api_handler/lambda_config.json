@@ -12,6 +12,14 @@
     {
       "resource_name": "${booking_userpool}",
       "resource_type": "cognito_idp"
+    },
+    {
+      "resource_name": "${tables_table}",
+      "resource_type": "dynamodb_table"
+    },
+    {
+      "resource_name": "${reservations_table}",
+      "resource_type": "dynamodb_table"
     }
   ],
   "event_sources": [],
@@ -25,6 +33,16 @@
       "resource_name": "${booking_userpool}",
       "resource_type": "cognito_idp",
       "parameter": "client_id"
+    },
+    "TABLES_TABLE": {
+      "resource_name": "${tables_table}",
+      "resource_type": "dynamodb_table",
+      "parameter": "table_name"
+    },
+    "RESERVATIONS_TABLE": {
+      "resource_name": "${reservations_table}",
+      "resource_type": "dynamodb_table",
+      "parameter": "table_name"
     }
   },
   "publish_version": true,

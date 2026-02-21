@@ -25,8 +25,8 @@ public class Function
     private readonly IAmazonCognitoIdentityProvider _cognito;
     private readonly IAmazonDynamoDB _ddb;
 
-    private readonly string _userPoolId;
-    private readonly string _clientId;
+    private readonly string? _userPoolId;
+    private readonly string? _clientId;
 
     // Optional - only required for /tables and /reservations (prevents 502 on /signup and /signin)
     private readonly string? _tablesTable;
@@ -37,8 +37,8 @@ public class Function
         _cognito = new AmazonCognitoIdentityProviderClient();
         _ddb = new AmazonDynamoDBClient();
 
-        _userPoolId = GetEnvOrThrow("cup_id");
-        _clientId = GetEnvOrThrow("cup_client_id");
+        _userPoolId = Environment.GetEnvironmentVariable("cup_id");
+        _clientId = Environment.GetEnvironmentVariable("cup_client_id");
 
         _tablesTable = Environment.GetEnvironmentVariable("TABLES_TABLE");
         _reservationsTable = Environment.GetEnvironmentVariable("RESERVATIONS_TABLE");
@@ -112,6 +112,9 @@ public class Function
 
     private async Task<APIGatewayProxyResponse> SignUp(APIGatewayProxyRequest req, ILambdaContext ctx)
     {
+        if (!TryGetCognitoConfig(out var userPoolId, out var clientId, ctx))
+            return Json(500, new { message = "Internal Server Error" });
+
         var body = ReadJson<SignUpBody>(req.Body);
         if (body is null)
             return Json(400, new { message = "Invalid request body" });
@@ -131,7 +134,7 @@ public class Function
         {
             var signUp = await _cognito.SignUpAsync(new SignUpRequest
             {
-                ClientId = _clientId,
+                ClientId = clientId,
                 Username = body.Email,
                 Password = body.Password,
                 UserAttributes = new List<AttributeType>
@@ -145,7 +148,7 @@ public class Function
             // Auto-confirm so signin works immediately (common EPAM requirement)
             await _cognito.AdminConfirmSignUpAsync(new AdminConfirmSignUpRequest
             {
-                UserPoolId = _userPoolId,
+                UserPoolId = userPoolId,
                 Username = body.Email
             });
 
@@ -173,6 +176,9 @@ public class Function
 
     private async Task<APIGatewayProxyResponse> SignIn(APIGatewayProxyRequest req, ILambdaContext ctx)
     {
+        if (!TryGetCognitoConfig(out var userPoolId, out var clientId, ctx))
+            return Json(500, new { message = "Internal Server Error" });
+
         var body = ReadJson<SignInBody>(req.Body);
         if (body is null || string.IsNullOrWhiteSpace(body.Email) || string.IsNullOrWhiteSpace(body.Password))
             return Json(400, new { message = "email and password are required" });
@@ -184,8 +190,8 @@ public class Function
         {
             var auth = await _cognito.AdminInitiateAuthAsync(new AdminInitiateAuthRequest
             {
-                UserPoolId = _userPoolId,
-                ClientId = _clientId,
+                UserPoolId = userPoolId,
+                ClientId = clientId,
                 AuthFlow = AuthFlowType.ADMIN_USER_PASSWORD_AUTH,
                 AuthParameters = new Dictionary<string, string>
                 {
@@ -246,10 +252,10 @@ public class Function
         // If id is provided by validator, use it; otherwise generate.
         var id = body.Id ?? Random.Shared.Next(10000, 99999);
 
-        // Store id as NUMBER (N) to match common labs; many also accept S, but N is safer for "id": 16126.
+        // Store id as STRING because ${tables_table} hash key type is S in deployment resources.
         var item = new Dictionary<string, AttributeValue>
         {
-            ["id"] = new AttributeValue { N = id.ToString() }
+            ["id"] = new AttributeValue { S = id.ToString() }
         };
 
         if (body.Number is not null) item["number"] = new AttributeValue { N = body.Number.Value.ToString() };
@@ -285,24 +291,11 @@ public class Function
     {
         var tableName = GetTablesTableOrThrow();
 
-        // Try N key first (since we store id as N), fallback to S
-        GetItemResponse resp;
-        if (int.TryParse(tableId, out var idNum))
+        var resp = await _ddb.GetItemAsync(new GetItemRequest
         {
-            resp = await _ddb.GetItemAsync(new GetItemRequest
-            {
-                TableName = tableName,
-                Key = new Dictionary<string, AttributeValue> { ["id"] = new AttributeValue { N = idNum.ToString() } }
-            });
-        }
-        else
-        {
-            resp = await _ddb.GetItemAsync(new GetItemRequest
-            {
-                TableName = tableName,
-                Key = new Dictionary<string, AttributeValue> { ["id"] = new AttributeValue { S = tableId } }
-            });
-        }
+            TableName = tableName,
+            Key = new Dictionary<string, AttributeValue> { ["id"] = new AttributeValue { S = tableId } }
+        });
 
         if (resp.Item is null || resp.Item.Count == 0)
             return Json(404, new { message = "Table not found" });
@@ -375,8 +368,19 @@ public class Function
     // Helpers
     // ---------------------------
 
-    private static string GetEnvOrThrow(string name) =>
-        Environment.GetEnvironmentVariable(name) ?? throw new Exception($"Missing env var: {name}");
+    private bool TryGetCognitoConfig(out string userPoolId, out string clientId, ILambdaContext ctx)
+    {
+        userPoolId = _userPoolId ?? "";
+        clientId = _clientId ?? "";
+
+        if (string.IsNullOrWhiteSpace(userPoolId) || string.IsNullOrWhiteSpace(clientId))
+        {
+            ctx.Logger.LogError("Missing Cognito configuration: cup_id and/or cup_client_id");
+            return false;
+        }
+
+        return true;
+    }
 
     private string GetTablesTableOrThrow() =>
         _tablesTable ?? throw new Exception("Missing env var: TABLES_TABLE");
