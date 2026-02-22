@@ -8,6 +8,7 @@ using Amazon.CognitoIdentityProvider;
 using Amazon.CognitoIdentityProvider.Model;
 using Amazon.DynamoDBv2;
 using Amazon.DynamoDBv2.Model;
+using Amazon.Runtime;
 using Amazon.Lambda.APIGatewayEvents;
 using Amazon.Lambda.Core;
 
@@ -52,13 +53,13 @@ namespace SimpleLambdaFunction
 
             if (resource == "/signup" && method == "POST") return await Signup(request);
             if (resource == "/signin" && method == "POST") return await Signin(request);
-            if (resource == "/tables" && method == "POST") return await AddTable(request);
 
             var userSub = TryGetUserSub(request);
             if (string.IsNullOrWhiteSpace(userSub))
                 return FormatResponse(401, new { message = "Unauthorized" });
 
             if (resource == "/tables" && method == "GET") return await GetTables();
+            if (resource == "/tables" && method == "POST") return await AddTable(request);
             if (resource == "/tables/{tableId}" && method == "GET") return await GetTableById(request);
             if (resource == "/reservations" && method == "GET") return await GetReservations(userSub);
             if (resource == "/reservations" && method == "POST") return await CreateReservation(request, userSub);
@@ -148,7 +149,7 @@ namespace SimpleLambdaFunction
         private sealed record SignUpBody(string FirstName, string LastName, string Email, string Password);
         private sealed record SignInBody(string Email, string Password);
         private sealed record AddTableBody(int? Id, int? Number, int? Places, bool? IsVip, int? MinOrder);
-        private sealed record CreateReservationBody(int? TableId, string Date, string Slot, string? Notes);
+        private sealed record CreateReservationBody(int? TableNumber, string ClientName, string PhoneNumber, string Date, string SlotTimeStart, string SlotTimeEnd);
 
         private async Task<APIGatewayProxyResponse> Signup(APIGatewayProxyRequest request)
         {
@@ -225,10 +226,11 @@ namespace SimpleLambdaFunction
         private async Task<APIGatewayProxyResponse> AddTable(APIGatewayProxyRequest request)
         {
             var body = ParseBody<AddTableBody>(request.Body);
-            if (body is null) return FormatResponse(400, new { message = "Invalid request body" });
+            if (body is null || body.Number is null || body.Places is null || body.IsVip is null)
+                return FormatResponse(400, new { message = "id, number, places, isVip are required" });
 
             var id = body.Id ?? Random.Shared.Next(10000, 99999);
-            await _tablesService.AddTable(id, body.Number, body.Places, body.IsVip, body.MinOrder);
+            await _tablesService.AddTable(id, body.Number.Value, body.Places.Value, body.IsVip.Value, body.MinOrder);
             return FormatResponse(200, new { id });
         }
 
@@ -252,18 +254,26 @@ namespace SimpleLambdaFunction
 
         private async Task<APIGatewayProxyResponse> GetReservations(string userSub)
         {
-            var reservations = await _reservationsService.GetReservations(userSub);
+            var reservations = await _reservationsService.GetReservations();
             return FormatResponse(200, reservations);
         }
 
         private async Task<APIGatewayProxyResponse> CreateReservation(APIGatewayProxyRequest request, string userSub)
         {
             var body = ParseBody<CreateReservationBody>(request.Body);
-            if (body is null || body.TableId is null || string.IsNullOrWhiteSpace(body.Date) || string.IsNullOrWhiteSpace(body.Slot))
-                return FormatResponse(400, new { message = "tableId, date, slot are required" });
+            if (body is null || body.TableNumber is null || string.IsNullOrWhiteSpace(body.ClientName) ||
+                string.IsNullOrWhiteSpace(body.PhoneNumber) || string.IsNullOrWhiteSpace(body.Date) ||
+                string.IsNullOrWhiteSpace(body.SlotTimeStart) || string.IsNullOrWhiteSpace(body.SlotTimeEnd))
+            {
+                return FormatResponse(400, new { message = "tableNumber, clientName, phoneNumber, date, slotTimeStart, slotTimeEnd are required" });
+            }
 
-            var id = await _reservationsService.CreateReservation(body.TableId.Value, body.Date, body.Slot, body.Notes, userSub);
-            return FormatResponse(201, new { id });
+            var tableExists = await _tablesService.GetTableByNumber(body.TableNumber.Value);
+            if (!tableExists)
+                return FormatResponse(400, new { message = "Table not found" });
+
+            var id = await _reservationsService.CreateReservation(body.TableNumber.Value, body.ClientName, body.PhoneNumber, body.Date, body.SlotTimeStart, body.SlotTimeEnd, userSub);
+            return FormatResponse(200, new { reservationId = id });
         }
     }
 
@@ -335,25 +345,25 @@ namespace SimpleLambdaFunction
                          throw new Exception("Missing TABLES_TABLE env var");
         }
 
-        public async Task AddTable(int id, int? number, int? places, bool? isVip, int? minOrder)
+        public async Task AddTable(int id, int number, int places, bool isVip, int? minOrder)
         {
             var item = new Dictionary<string, AttributeValue>
             {
-                ["id"] = new AttributeValue { S = id.ToString() }
+                ["id"] = new AttributeValue { N = id.ToString() },
+                ["number"] = new AttributeValue { N = number.ToString() },
+                ["places"] = new AttributeValue { N = places.ToString() },
+                ["isVip"] = new AttributeValue { BOOL = isVip }
             };
 
-            if (number is not null) item["number"] = new AttributeValue { N = number.Value.ToString() };
-            if (places is not null) item["places"] = new AttributeValue { N = places.Value.ToString() };
-            if (isVip is not null) item["isVip"] = new AttributeValue { BOOL = isVip.Value };
             if (minOrder is not null) item["minOrder"] = new AttributeValue { N = minOrder.Value.ToString() };
 
             await _ddb.PutItemAsync(new PutItemRequest { TableName = _tableName, Item = item });
         }
 
-        public async Task<List<Dictionary<string, object?>>> GetTables()
+        public async Task<Dictionary<string, object?>> GetTables()
         {
             var resp = await _ddb.ScanAsync(new ScanRequest { TableName = _tableName });
-            return resp.Items.Select(ToPlain).ToList();
+            return new Dictionary<string, object?> { ["tables"] = resp.Items.Select(ToPlain).ToList() };
         }
 
         public async Task<Dictionary<string, object?>?> GetTableById(string tableId)
@@ -363,7 +373,7 @@ namespace SimpleLambdaFunction
                 TableName = _tableName,
                 Key = new Dictionary<string, AttributeValue>
                 {
-                    ["id"] = new AttributeValue { S = tableId }
+                    ["id"] = new AttributeValue { N = tableId }
                 }
             });
 
@@ -371,6 +381,19 @@ namespace SimpleLambdaFunction
                 return null;
 
             return ToPlain(resp.Item);
+        }
+
+        public async Task<bool> GetTableByNumber(int tableNumber)
+        {
+            var resp = await _ddb.ScanAsync(new ScanRequest
+            {
+                TableName = _tableName,
+                FilterExpression = "#num = :num",
+                ExpressionAttributeNames = new Dictionary<string, string> { ["#num"] = "number" },
+                ExpressionAttributeValues = new Dictionary<string, AttributeValue> { [":num"] = new AttributeValue { N = tableNumber.ToString() } }
+            });
+
+            return resp.Items.Count > 0;
         }
 
         private static Dictionary<string, object?> ToPlain(Dictionary<string, AttributeValue> item)
@@ -401,40 +424,67 @@ namespace SimpleLambdaFunction
                          throw new Exception("Missing RESERVATIONS_TABLE env var");
         }
 
-        public async Task<List<Dictionary<string, object?>>> GetReservations(string userSub)
+        public async Task<Dictionary<string, object?>> GetReservations()
         {
-            var resp = await _ddb.ScanAsync(new ScanRequest
+            var resp = await _ddb.ScanAsync(new ScanRequest { TableName = _tableName });
+
+            return new Dictionary<string, object?> { ["reservations"] = resp.Items.Select(ToPlain).ToList() };
+        }
+
+        public async Task<string> CreateReservation(int tableNumber, string clientName, string phoneNumber, string date, string slotTimeStart, string slotTimeEnd, string userSub)
+        {
+            var id = Guid.NewGuid().ToString();
+
+            var existing = await _ddb.ScanAsync(new ScanRequest
             {
                 TableName = _tableName,
-                FilterExpression = "#u = :u",
-                ExpressionAttributeNames = new Dictionary<string, string> { ["#u"] = "userSub" },
+                FilterExpression = "#tn = :tn and #d = :d",
+                ExpressionAttributeNames = new Dictionary<string, string>
+                {
+                    ["#tn"] = "tableNumber",
+                    ["#d"] = "date"
+                },
                 ExpressionAttributeValues = new Dictionary<string, AttributeValue>
                 {
-                    [":u"] = new AttributeValue { S = userSub }
+                    [":tn"] = new AttributeValue { N = tableNumber.ToString() },
+                    [":d"] = new AttributeValue { S = date }
                 }
             });
 
-            return resp.Items.Select(ToPlain).ToList();
-        }
+            foreach (var item in existing.Items)
+            {
+                var start = item["slotTimeStart"].S ?? string.Empty;
+                var end = item["slotTimeEnd"].S ?? string.Empty;
+                if (IsTimeOverlap(start, end, slotTimeStart, slotTimeEnd))
+                    throw new AmazonServiceException("Conflicting reservations");
+            }
 
-        public async Task<string> CreateReservation(int tableId, string date, string slot, string? notes, string userSub)
-        {
-            var id = Guid.NewGuid().ToString("N");
             var item = new Dictionary<string, AttributeValue>
             {
                 ["id"] = new AttributeValue { S = id },
-                ["tableId"] = new AttributeValue { N = tableId.ToString() },
+                ["tableNumber"] = new AttributeValue { N = tableNumber.ToString() },
+                ["clientName"] = new AttributeValue { S = clientName },
+                ["phoneNumber"] = new AttributeValue { S = phoneNumber },
                 ["date"] = new AttributeValue { S = date },
-                ["slot"] = new AttributeValue { S = slot },
+                ["slotTimeStart"] = new AttributeValue { S = slotTimeStart },
+                ["slotTimeEnd"] = new AttributeValue { S = slotTimeEnd },
                 ["userSub"] = new AttributeValue { S = userSub },
                 ["createdAt"] = new AttributeValue { S = DateTimeOffset.UtcNow.ToString("O") }
             };
 
-            if (!string.IsNullOrWhiteSpace(notes))
-                item["notes"] = new AttributeValue { S = notes };
-
             await _ddb.PutItemAsync(new PutItemRequest { TableName = _tableName, Item = item });
             return id;
+        }
+
+        private static bool IsTimeOverlap(string existingStart, string existingEnd, string newStart, string newEnd)
+        {
+            if (!TimeSpan.TryParse(existingStart, out var es) || !TimeSpan.TryParse(existingEnd, out var ee) ||
+                !TimeSpan.TryParse(newStart, out var ns) || !TimeSpan.TryParse(newEnd, out var ne))
+            {
+                return true;
+            }
+
+            return ns < ee && es < ne;
         }
 
         private static Dictionary<string, object?> ToPlain(Dictionary<string, AttributeValue> item)
