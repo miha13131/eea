@@ -7,7 +7,7 @@
   "runtime": "dotnet8",
   "memory": 128,
   "timeout": 100,
-  "lambda_path": "lambdas\\api_handler",
+  "lambda_path": "lambdas/api_handler",
   "dependencies": [
     {
       "resource_name": "${booking_userpool}",
@@ -34,15 +34,16 @@
       "resource_type": "cognito_idp",
       "parameter": "client_id"
     },
+
     "TABLES_TABLE": {
       "resource_name": "${tables_table}",
       "resource_type": "dynamodb_table",
-      "parameter": "table_name"
+      "parameter": "id"
     },
     "RESERVATIONS_TABLE": {
       "resource_name": "${reservations_table}",
       "resource_type": "dynamodb_table",
-      "parameter": "table_name"
+      "parameter": "id"
     }
   },
   "publish_version": true,
